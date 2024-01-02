@@ -319,9 +319,8 @@ namespace WebPify
         /// <summary>
         /// This methods converts the images to '.webp' and moves them to the correct folders.
         /// </summary>
-        private void ConvertImages()
+        private async void ConvertImages(Action onComplete = null)
         {
-
             try
             {
                 var builder = new WebPEncoderBuilder();
@@ -356,21 +355,23 @@ namespace WebPify
                         Log("Canceled by user", Color.Red);
                         Log();
 
+                        onComplete?.Invoke();
                         return;
                     }
 
                     int lastDotIndex = _selectedImages[i].LastIndexOf('.');
                     var converted = _selectedImages[i].Substring(0, lastDotIndex) + ".webp";
 
-
-                    using (var outputFile = File.Open(converted, FileMode.Create))
+                    await Task.Run(() =>
                     {
-                        using (var inputFile = File.Open(_selectedImages[i], FileMode.Open))
+                        using (var outputFile = File.Open(converted, FileMode.Create))
                         {
-                            encoder.Encode(inputFile, outputFile);
+                            using (var inputFile = File.Open(_selectedImages[i], FileMode.Open))
+                            {
+                                encoder.Encode(inputFile, outputFile);
+                            }
                         }
-                    }
-
+                    });
 
                     var fileToMove = ReplaceOriginals ? Path.GetFileName(_selectedImages[i]) : Path.GetFileName(converted);
                     var sourceDir = Path.GetDirectoryName(SourcePath);
@@ -403,7 +404,11 @@ namespace WebPify
                 Log();
                 Log(ex.Message.Trim(), Color.Red);
                 Log();
+
+                onComplete?.Invoke();
             }
+
+            onComplete?.Invoke();
         }
         #endregion
 
@@ -462,7 +467,8 @@ namespace WebPify
                     UpdateImagesFound(paths.Count);
 
                     SourcePath = selectedDirectory;
-                    OutputPath = Path.Combine(selectedDirectory, OutputFolderName);
+                    if (string.IsNullOrEmpty(OutputPath))
+                        OutputPath = Path.Combine(selectedDirectory, OutputFolderName);
 
                     SelectedImages = paths;
                 });
@@ -472,7 +478,8 @@ namespace WebPify
                     UpdateImagesFound(1);
 
                     SourcePath = filePath;
-                    OutputPath = Path.Combine(Path.GetDirectoryName(filePath), OutputFolderName);
+                    if (string.IsNullOrEmpty(OutputPath))
+                        OutputPath = Path.Combine(Path.GetDirectoryName(filePath), OutputFolderName);
 
                     SelectedImages.Clear();
                     SelectedImages.Add(filePath);
@@ -511,25 +518,29 @@ namespace WebPify
 
             CanCancel = true;
 
+            // disable the button so we can initiate another convert action
+            button_convert.Enabled = false;
+
             // do convertion
-            ConvertImages();
+            ConvertImages(() =>
+            {
+                CanCancel = false;
 
-            CanCancel = false;
+                // reset source path and output path back to empty strings
+                SourcePath = "";
+                OutputPath = "";
 
-            // reset source path and output path back to empty strings
-            SourcePath = "";
-            OutputPath = "";
+                UpdateImagesFound(0);
 
-            UpdateImagesFound(0);
+                SelectedImages.Clear();
+                _selectedImagesChanged?.Invoke(SelectedImages);
 
-            SelectedImages.Clear();
-            _selectedImagesChanged?.Invoke(SelectedImages);
+                progressBar_convert.Value = 0;
+                progressBar_convert.Update();
 
-            progressBar_convert.Value = 0;
-            progressBar_convert.Update();
-
-            // reenable the tabs
-            tabControl_main.Enabled = true;
+                // reenable the tabs
+                tabControl_main.Enabled = true;
+            });
         }
 
         private void trackBar_quality_Scroll(object sender, EventArgs e)
