@@ -29,6 +29,7 @@
         private void InitializeComponent()
         {
             components = new System.ComponentModel.Container();
+            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(MainWindow));
             tabControl_main = new TabControl();
             tab_main = new TabPage();
             label_noFormatsWarning = new Label();
@@ -447,6 +448,7 @@
             Controls.Add(tabControl_main);
             Controls.Add(button_convert);
             FormBorderStyle = FormBorderStyle.Fixed3D;
+            Icon = (Icon)resources.GetObject("$this.Icon");
             Name = "MainWindow";
             Text = "WebPify";
             Load += MainWindow_Load;
