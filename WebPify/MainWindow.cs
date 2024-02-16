@@ -163,6 +163,8 @@ namespace WebPify
                 checkedListBox_formats.Items.Insert(i, entry);
                 checkedListBox_formats.SetItemChecked(i, true);
             }
+
+            Text = $"{Application.ProductName} - {Application.ProductVersion.Split('+')[0]}";
         }
 
         private void MainWindow_Load(object sender, EventArgs e)
@@ -319,7 +321,7 @@ namespace WebPify
         /// <summary>
         /// This methods converts the images to '.webp' and moves them to the correct folders.
         /// </summary>
-        private async void ConvertImages(Action onComplete = null)
+        private async Task ConvertImagesParallel(Action? onComplete = null)
         {
             try
             {
@@ -345,33 +347,23 @@ namespace WebPify
                 progressBar_convert.Maximum = _selectedImages.Count;
                 progressBar_convert.Update();
 
-                for (int i = 0; i < _selectedImages.Count; i++)
+                int completedCount = 0;
+
+                await Task.Factory.StartNew(() => Parallel.For(0, _selectedImages.Count, (i) =>
                 {
                     if (_cancel)
-                    {
-                        _cancel = false;
-
-                        Log();
-                        Log("Canceled by user", Color.Red);
-                        Log();
-
-                        onComplete?.Invoke();
                         return;
-                    }
 
                     int lastDotIndex = _selectedImages[i].LastIndexOf('.');
                     var converted = _selectedImages[i].Substring(0, lastDotIndex) + ".webp";
 
-                    await Task.Run(() =>
+                    using (var outputFile = File.Open(converted, FileMode.Create))
                     {
-                        using (var outputFile = File.Open(converted, FileMode.Create))
+                        using (var inputFile = File.Open(_selectedImages[i], FileMode.Open))
                         {
-                            using (var inputFile = File.Open(_selectedImages[i], FileMode.Open))
-                            {
-                                encoder.Encode(inputFile, outputFile);
-                            }
+                            encoder.Encode(inputFile, outputFile);
                         }
-                    });
+                    }
 
                     var fileToMove = ReplaceOriginals ? Path.GetFileName(_selectedImages[i]) : Path.GetFileName(converted);
                     var sourceDir = Path.GetDirectoryName(SourcePath);
@@ -387,25 +379,40 @@ namespace WebPify
 
                     Directory.Move(ReplaceOriginals ? _selectedImages[i] : converted, destination);
 
-                    Log($"Image {i + 1} of {_selectedImages.Count} complete.");
-                    Log($"    Old: {(ReplaceOriginals ? destination : _selectedImages[i])}");
-                    Log($"    New: {(ReplaceOriginals ? converted : destination)}");
+                    // allows us to set the values of forms elemets from other threads
+                    Invoke(new MethodInvoker(delegate ()
+                    {
+                        completedCount++;
 
-                    progressBar_convert.Value = i + 1;
-                    progressBar_convert.Update();
+                        Log($"Image {completedCount} of {_selectedImages.Count} complete.");
+                        Log($"    Old: {(ReplaceOriginals ? destination : _selectedImages[i])}");
+                        Log($"    New: {(ReplaceOriginals ? converted : destination)}");
+
+                        progressBar_convert.Value = completedCount;
+                        progressBar_convert.Update();
+                    }));
+                }));
+
+                if (_cancel)
+                {
+                    _cancel = false;
+
+                    Log();
+                    Log("Canceled by user", Color.Red);
+                    Log();
                 }
-
-                Log();
-                Log("Done", Color.DarkGreen);
-                Log();
+                else
+                {
+                    Log();
+                    Log("Done", Color.DarkGreen);
+                    Log();
+                }
             }
             catch (Exception ex)
             {
                 Log();
                 Log(ex.Message.Trim(), Color.Red);
                 Log();
-
-                onComplete?.Invoke();
             }
 
             onComplete?.Invoke();
@@ -522,7 +529,8 @@ namespace WebPify
             button_convert.Enabled = false;
 
             // do convertion
-            ConvertImages(() =>
+            //ConvertImagesAsync(() =>
+            _ = ConvertImagesParallel(() =>
             {
                 CanCancel = false;
 
@@ -571,12 +579,12 @@ namespace WebPify
         {
             textBox_log.Clear();
         }
-        #endregion
 
         private void button_cancelConvert_Click(object sender, EventArgs e)
         {
             _cancel = true;
             CanCancel = false;
         }
+        #endregion
     }
 }
