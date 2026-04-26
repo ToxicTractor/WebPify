@@ -5,48 +5,15 @@ namespace WebPify
 {
     public partial class MainWindow : Form
     {
-        #region Structs
-        private struct ImageFormat
-        {
-            public string Name;
-            public string Extension;
-            public string AlternateExtension;
-        }
-        #endregion
-
-        #region Enums
-        public enum CompressionTypes { Lossy, Lossless, NearLossless }
-        #endregion
-
         #region Private fields
-        private bool _canCancel = false;
-        private bool _cancel = false;
+        private bool _canRequestCancel = false;
+        private bool _requestCancel = false;
 
-        private readonly ImageFormat[] SUPPORTED_FILE_FORMATS = [FORMAT_JPG, FORMAT_PNG, FORMAT_TIFF];
-        private Dictionary<int, ImageFormat> _formatIndexDict = new Dictionary<int, ImageFormat>();
+        private List<ImageFileReference> _selectedImages = new List<ImageFileReference>();
 
-        private List<string> _selectedImages = new List<string>();
+        private event Action<List<ImageFileReference>> _selectedImagesChanged;
 
-        private event Action<List<string>> _selectedImagesChanged;
-
-        private static readonly ImageFormat FORMAT_PNG = new ImageFormat()
-        {
-            Name = "PNG",
-            Extension = ".png"
-        };
-
-        private static readonly ImageFormat FORMAT_JPG = new ImageFormat()
-        {
-            Name = "JPG/JPEG",
-            Extension = ".jpg",
-            AlternateExtension = ".jpeg"
-        };
-
-        private static readonly ImageFormat FORMAT_TIFF = new ImageFormat()
-        {
-            Name = "TIFF",
-            Extension = ".tiff"
-        };
+        private LogBuilder _log;
         #endregion
 
         #region Properties
@@ -92,9 +59,9 @@ namespace WebPify
             set => textBox_defaultOutputFolderName.Text = value;
         }
 
-        public CompressionTypes Compression
+        public ECompressionType Compression
         {
-            get => (CompressionTypes)comboBox_compression.SelectedIndex;
+            get => (ECompressionType)comboBox_compression.SelectedIndex;
             set
             {
                 comboBox_compression.SelectedIndex = (int)value;
@@ -113,7 +80,7 @@ namespace WebPify
             set => trackBar_nearLosslessValue.Value = value;
         }
 
-        public List<string> SelectedImages
+        public List<ImageFileReference> SelectedImages
         {
             get => _selectedImages;
             set
@@ -128,20 +95,6 @@ namespace WebPify
                 _selectedImagesChanged?.Invoke(_selectedImages);
             }
         }
-
-        private bool CanCancel
-        {
-            get => _canCancel;
-            set
-            {
-                if (_canCancel == value)
-                    return;
-
-                _canCancel = value;
-
-                button_cancelConvert.Enabled = _canCancel;
-            }
-        }
         #endregion
 
         #region Forms methods
@@ -149,75 +102,130 @@ namespace WebPify
         {
             InitializeComponent();
 
+            // initialize the log
+            _log = new LogBuilder(textBox_log);
+
+            _log.Log("Application startup.", logVisibility: ELogVisibility.Internal);
+
             // event subscriptions
             _selectedImagesChanged += OnSelectedImagesChange;
             textBox_log.VisibleChanged += OnLogVisibilityChanged;
             comboBox_compression.SelectedIndexChanged += OnSelectedCompressionTypeChanged;
             textBox_defaultOutputFolderName.TextChanged += OnOutputFolderNameChanged;
+            tabControl_main.SelectedIndexChanged += OnSelectedIndexChanged;
 
             checkedListBox_formats.Items.Clear();
-            for (int i = 0; i < SUPPORTED_FILE_FORMATS.Length; i++)
+            for (int i = 0; i < Constants.SUPPORTED_FILE_FORMATS.Length; i++)
             {
-                var entry = SUPPORTED_FILE_FORMATS[i].Name;
+                var entry = Constants.SUPPORTED_FILE_FORMATS[i].Name;
 
                 checkedListBox_formats.Items.Insert(i, entry);
                 checkedListBox_formats.SetItemChecked(i, true);
             }
 
             Text = $"{Application.ProductName} - {Application.ProductVersion.Split('+')[0]}";
+
+            // hide the clear log button until we go to the log page
+            button_clearLog.Visible = false;
         }
 
         private void MainWindow_Load(object sender, EventArgs e)
         {
-            Compression = CompressionTypes.Lossy;
+            Compression = ECompressionType.Lossy;
+        }
+
+        private void MainWindow_FormClosed(object sender, FormClosedEventArgs e)
+        {
+            _log.Log("Application shutdown.", logVisibility: ELogVisibility.Internal);
         }
         #endregion
 
-        #region Private methods
-        private bool IsFormatEnabled(ImageFormat format)
+        #region Public methods
+        public bool IsFormatEnabled(ImageFormat format)
         {
             if (checkedListBox_formats.CheckedIndices.Count == 0)
                 return true;
 
-            int formatIndex = Array.IndexOf(SUPPORTED_FILE_FORMATS, format);
+            int formatIndex = Array.IndexOf(Constants.SUPPORTED_FILE_FORMATS, format);
 
             return checkedListBox_formats.CheckedIndices.Contains(formatIndex);
         }
+        #endregion
 
-        private List<string> ScanDirectory(string dir)
+        #region Private methods
+        private void SetCanRequestCancel(bool value)
         {
-            var searchOptions = ScanSubdirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-            List<string> result = new List<string>();
+            if (_canRequestCancel == value)
+                return;
 
-            for (int i = 0; i < SUPPORTED_FILE_FORMATS.Length; i++)
+            _canRequestCancel = value;
+
+            button_cancelConvert.Enabled = _canRequestCancel;
+        }
+
+        private List<ImageFileReference> ScanDirectory(string dir)
+        {
+            var errorCount = 0;
+            var searchOptions = ScanSubdirectories ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+            List<ImageFileReference> imageReferences = new List<ImageFileReference>();
+
+            _log.Log($"Directory scan started. Scan subdirectories: {ScanSubdirectories}, Path: {dir}", logVisibility: ELogVisibility.Internal);
+
+            for (int i = 0; i < Constants.SUPPORTED_FILE_FORMATS.Length; i++)
             {
-                var format = SUPPORTED_FILE_FORMATS[i];
+                var format = Constants.SUPPORTED_FILE_FORMATS[i];
 
                 if (!IsFormatEnabled(format))
                     continue;
 
-                // get each file in the folder with the current extension
-                var files = Directory.GetFiles(dir, $"*{format.Extension}", searchOptions);
-
-                for (int j = 0; j < files.Length; j++)
-                {
-                    result.Add(files[j]);
-                }
+                // add images from the main file extension
+                errorCount += AddImageReferencesFromExtension(dir, format.Extension, searchOptions, ref imageReferences);
 
                 // continue to the next format if the alternate extension is null or empty
                 if (string.IsNullOrEmpty(format.AlternateExtension))
                     continue;
 
-                // do the same for the alternate extension
-                files = Directory.GetFiles(dir, $"*{format.AlternateExtension}", searchOptions);
-
-                for (int j = 0; j < files.Length; j++)
-                {
-                    result.Add(files[j]);
-                }
+                // add images from the alternate extension
+                errorCount += AddImageReferencesFromExtension(dir, format.AlternateExtension, searchOptions, ref imageReferences);
             }
 
-            return result;
+            // change the tab to the log windows to show errors
+            if (errorCount > 0)
+            {
+                _log.LogError($"Directory scan completed with errors!", logVisibility: ELogVisibility.Internal);
+                tabControl_main.SelectedIndex = 2;
+                return new List<ImageFileReference>(); // return an empty list to make sure you cannot convert when there are errors
+            }
+
+            _log.Log($"Directory scan completed. Images found: {imageReferences.Count}", logVisibility: ELogVisibility.Internal);
+
+            return imageReferences;
+        }
+
+        private int AddImageReferencesFromExtension(string dir, string extension, SearchOption searchOptions, ref List<ImageFileReference> imageReferenceList)
+        {
+            int errorCount = 0;
+
+            // get each file in the folder with the current extension
+            var files = Directory.GetFiles(dir, $"*{extension}", searchOptions);
+
+            for (int j = 0; j < files.Length; j++)
+            {
+                var imageReference = new ImageFileReference(files[j]);
+
+                // if an image in the list already has the same path, dont add the new one, but log an error
+                if (imageReferenceList.Where(x => x.FilePathNoExtension.ToLower() == imageReference.FilePathNoExtension.ToLower()).Any())
+                {
+                    errorCount++;
+                    _log.LogError($"Multiple images with the name '{LogBuilder.FormatAsLink(imageReference.FilePath, imageReference.FileName)}' in folder '{LogBuilder.FormatAsLink(imageReference.DirectoryPath)}'", ELogVisibility.User);
+                    _log.LogError($"Multiple images with the name '{imageReference.FileName}' in folder '{imageReference.DirectoryPath}'", ELogVisibility.Internal);
+                    continue;
+                }
+
+                imageReferenceList.Add(imageReference);
+            }
+
+            return errorCount;
         }
 
         private void UpdateImagesFound(int count)
@@ -238,86 +246,6 @@ namespace WebPify
             }
         }
 
-        private void Log(string logEntry = "", Color? color = null)
-        {
-            if (color == null)
-                color = Color.Black;
-
-            textBox_log.SuspendLayout();
-            textBox_log.SelectionColor = color.Value;
-
-            if (logEntry == "")
-                textBox_log.AppendText(Environment.NewLine);
-            else
-                textBox_log.AppendText(logEntry + Environment.NewLine);
-
-            textBox_log.ScrollToCaret();
-            textBox_log.ResumeLayout();
-        }
-
-        private void OpenFolderBrowser(Action<string> onComplete)
-        {
-            var dialogue = new FolderBrowserDialog();
-
-            var result = dialogue.ShowDialog();
-
-            if (result == DialogResult.OK)
-            {
-                onComplete?.Invoke(dialogue.SelectedPath);
-            }
-        }
-
-        private void OpenFileBrowser(Action<string> onComplete)
-        {
-            var dialogue = new OpenFileDialog();
-
-            string filter = "Images files (";
-
-            bool isFirst = true;
-            for (int i = 0; i < SUPPORTED_FILE_FORMATS.Length; i++)
-            {
-                var format = SUPPORTED_FILE_FORMATS[i];
-
-                if (!IsFormatEnabled(format))
-                    continue;
-
-                if (isFirst)
-                    isFirst = false;
-                else
-                    filter += ", ";
-
-                filter += $"{format.Name}";
-            }
-            isFirst = true;
-            filter += ")|";
-            for (int i = 0; i < SUPPORTED_FILE_FORMATS.Length; i++)
-            {
-                var format = SUPPORTED_FILE_FORMATS[i];
-
-                if (!IsFormatEnabled(format))
-                    continue;
-
-                if (isFirst)
-                    isFirst = false;
-                else
-                    filter += ";";
-
-                filter += $"*{format.Extension}";
-
-                if (!string.IsNullOrEmpty(format.AlternateExtension))
-                    filter += $";*{format.AlternateExtension}";
-            }
-
-            dialogue.Filter = filter;
-
-            var result = dialogue.ShowDialog();
-
-            if (result == DialogResult.OK)
-            {
-                onComplete?.Invoke(dialogue.FileName);
-            }
-        }
-
         /// <summary>
         /// This methods converts the images to '.webp' and moves them to the correct folders.
         /// </summary>
@@ -330,11 +258,11 @@ namespace WebPify
 
                 switch (Compression)
                 {
-                    case CompressionTypes.Lossless:
+                    case ECompressionType.Lossless:
                         encoder = builder.CompressionConfig(x => x.Lossless(y => y.Quality(Quality))).Build();
                         break;
 
-                    case CompressionTypes.NearLossless:
+                    case ECompressionType.NearLossless:
                         encoder = builder.CompressionConfig(x => x.NearLossless(NearLosslessLevel, y => y.Quality(Quality))).Build();
                         break;
 
@@ -348,71 +276,94 @@ namespace WebPify
                 progressBar_convert.Update();
 
                 int completedCount = 0;
+                var convertedImages = new ImageFileReference[_selectedImages.Count];
 
-                await Task.Factory.StartNew(() => Parallel.For(0, _selectedImages.Count, (i) =>
+                await Task.Factory.StartNew(() => Parallel.For(0, _selectedImages.Count, (i, state) =>
                 {
-                    if (_cancel)
-                        return;
+                    convertedImages[i] = new ImageFileReference(_selectedImages[i].FilePathNoExtension + ".webp");
 
-                    int lastDotIndex = _selectedImages[i].LastIndexOf('.');
-                    var converted = _selectedImages[i].Substring(0, lastDotIndex) + ".webp";
-
-                    using (var outputFile = File.Open(converted, FileMode.Create))
+                    // if the converted file already exist at the output path, skip it and note it in the log
+                    if (File.Exists(convertedImages[i].FileName))
                     {
-                        using (var inputFile = File.Open(_selectedImages[i], FileMode.Open))
+                        Invoke(new MethodInvoker(delegate ()
                         {
-                            encoder.Encode(inputFile, outputFile);
-                        }
+                            _log.LogError($"File '{convertedImages[i].FilePath}' already exist.");
+                            _log.LogError("Image conversion skipped.", ELogVisibility.User);
+                        }));
+
+                        return;
                     }
 
-                    var fileToMove = ReplaceOriginals ? Path.GetFileName(_selectedImages[i]) : Path.GetFileName(converted);
+                    try
+                    {
+                        using (var outputFile = File.Open(convertedImages[i].FilePath, FileMode.Create))
+                        {
+                            using (var inputFile = File.Open(_selectedImages[i].FilePath, FileMode.Open))
+                            {
+                                encoder.Encode(inputFile, outputFile);
+                            }
+                        }
+                    }
+                    catch (Exception ex) // catch and log any other errors that may occure
+                    {
+                        Invoke(new MethodInvoker(delegate ()
+                        {
+                            _log.LogError(ex.Message.Trim());
+                            _log.LogError("Image conversion skipped.", ELogVisibility.User);
+                        }));
+
+                        return;
+                    }
+
+                    var fileToMove = ReplaceOriginals ? _selectedImages[i].FullFileName : convertedImages[i].FullFileName;
                     var sourceDir = Path.GetDirectoryName(SourcePath);
-                    var currentImageDir = Path.GetDirectoryName(_selectedImages[i]);
+                    var currentImageDir = _selectedImages[i].DirectoryPath;
+
+                    if (string.IsNullOrEmpty(sourceDir) || string.IsNullOrEmpty(currentImageDir))
+                        return;
+
                     var destinationDir = currentImageDir.Replace(sourceDir, OutputPath);
                     var destination = Path.Combine(destinationDir, fileToMove);
-
-                    Debug.WriteLine("Destination: " + destination);
-                    Debug.WriteLine("From: " + (ReplaceOriginals ? _selectedImages[i] : converted));
 
                     if (!Directory.Exists(destinationDir))
                         Directory.CreateDirectory(destinationDir);
 
-                    Directory.Move(ReplaceOriginals ? _selectedImages[i] : converted, destination);
+                    Directory.Move(ReplaceOriginals ? _selectedImages[i].FilePath : convertedImages[i].FilePath, destination);
 
                     // allows us to set the values of forms elemets from other threads
                     Invoke(new MethodInvoker(delegate ()
                     {
                         completedCount++;
 
-                        Log($"Image {completedCount} of {_selectedImages.Count} complete.");
-                        Log($"    Old: {(ReplaceOriginals ? destination : _selectedImages[i])}");
-                        Log($"    New: {(ReplaceOriginals ? converted : destination)}");
+                        _log.Log($"Image {completedCount} of {_selectedImages.Count} complete.", logVisibility: ELogVisibility.User);
+                        _log.Log($"    Old: {LogBuilder.FormatAsLink(ReplaceOriginals ? destination : _selectedImages[i].FilePath)}", logVisibility: ELogVisibility.User);
+                        _log.Log($"    New: {LogBuilder.FormatAsLink(ReplaceOriginals ? convertedImages[i].FilePath : destination)}", logVisibility: ELogVisibility.User);
+
+                        _log.Log($"Conversion completed: {(ReplaceOriginals ? destination : _selectedImages[i].FilePath)} -> {(ReplaceOriginals ? convertedImages[i].FilePath : destination)}", logVisibility: ELogVisibility.Internal);
 
                         progressBar_convert.Value = completedCount;
                         progressBar_convert.Update();
                     }));
+
+                    // if the user cancled break the loop
+                    if (_requestCancel)
+                        state.Break();
                 }));
 
-                if (_cancel)
+                if (_requestCancel)
                 {
-                    _cancel = false;
+                    _requestCancel = false;
 
-                    Log();
-                    Log("Canceled by user", Color.Red);
-                    Log();
+                    _log.Log("Canceled by user.", Color.Red);
                 }
                 else
                 {
-                    Log();
-                    Log("Done", Color.DarkGreen);
-                    Log();
+                    _log.Log("Done!", Color.DarkGreen, ELogVisibility.User);
                 }
             }
             catch (Exception ex)
             {
-                Log();
-                Log(ex.Message.Trim(), Color.Red);
-                Log();
+                _log.LogError(ex.Message.Trim());
             }
 
             onComplete?.Invoke();
@@ -434,9 +385,9 @@ namespace WebPify
         private void OnSelectedCompressionTypeChanged(object? sender, EventArgs e)
         {
             // disable or enable the near lossless level slider based on the currently selected compression type
-            label_nearLosslessTitle.Enabled = Compression == CompressionTypes.NearLossless;
-            label_nearLosslessValue.Enabled = Compression == CompressionTypes.NearLossless;
-            trackBar_nearLosslessValue.Enabled = Compression == CompressionTypes.NearLossless;
+            label_nearLosslessTitle.Enabled = Compression == ECompressionType.NearLossless;
+            label_nearLosslessValue.Enabled = Compression == ECompressionType.NearLossless;
+            trackBar_nearLosslessValue.Enabled = Compression == ECompressionType.NearLossless;
         }
 
         private void OnLogVisibilityChanged(object? sender, EventArgs e)
@@ -450,7 +401,7 @@ namespace WebPify
             textBox_log.ScrollToCaret();
         }
 
-        private void OnSelectedImagesChange(List<string> newSelected)
+        private void OnSelectedImagesChange(List<ImageFileReference> newSelected)
         {
             UpdateImagesFound(_selectedImages.Count);
 
@@ -461,13 +412,18 @@ namespace WebPify
             textBox_source.SelectionStart = SourcePath.Length;
             textBox_output.SelectionStart = OutputPath.Length;
         }
+
+        private void OnSelectedIndexChanged(object? sender, EventArgs e)
+        {
+            button_clearLog.Visible = tabControl_main.SelectedIndex == 2;
+        }
         #endregion
 
         #region Forms event handlers
         private void button_browse_source_Click(object sender, EventArgs e)
         {
             if (BatchConvert)
-                OpenFolderBrowser((selectedDirectory) =>
+                Utility.OpenFolderBrowser(this, (selectedDirectory) =>
                 {
                     var paths = ScanDirectory(selectedDirectory);
 
@@ -480,16 +436,18 @@ namespace WebPify
                     SelectedImages = paths;
                 });
             else
-                OpenFileBrowser((filePath) =>
+                Utility.OpenFileBrowser(this, (filePath) =>
                 {
                     UpdateImagesFound(1);
 
                     SourcePath = filePath;
+
+                    ImageFileReference fileRef = new ImageFileReference(filePath);
                     if (string.IsNullOrEmpty(OutputPath))
-                        OutputPath = Path.Combine(Path.GetDirectoryName(filePath), OutputFolderName);
+                        OutputPath = Path.Combine(fileRef.DirectoryPath, OutputFolderName);
 
                     SelectedImages.Clear();
-                    SelectedImages.Add(filePath);
+                    SelectedImages.Add(fileRef);
                     _selectedImagesChanged?.Invoke(SelectedImages); // manually invoke event at the list was not changed directly
                 });
         }
@@ -511,7 +469,7 @@ namespace WebPify
 
         private void button_browse_output_Click(object sender, EventArgs e)
         {
-            OpenFolderBrowser((selectedDirectory) =>
+            Utility.OpenFolderBrowser(this, (selectedDirectory) =>
             {
                 OutputPath = Path.Combine(selectedDirectory, OutputFolderName);
             });
@@ -523,16 +481,19 @@ namespace WebPify
             tabControl_main.SelectedIndex = 2;
             tabControl_main.Enabled = false;
 
-            CanCancel = true;
+            SetCanRequestCancel(true);
 
             // disable the button so we can initiate another convert action
             button_convert.Enabled = false;
 
-            // do convertion
-            //ConvertImagesAsync(() =>
+            _log.Log(BatchConvert ? "Batch convert started." : "Single file convert started.", logVisibility: ELogVisibility.Internal);
+
+            // do conversion
             _ = ConvertImagesParallel(() =>
             {
-                CanCancel = false;
+                _log.Log(BatchConvert ? "Batch convert completed." : "Single file convert completed.", logVisibility: ELogVisibility.Internal);
+
+                SetCanRequestCancel(false);
 
                 // reset source path and output path back to empty strings
                 SourcePath = "";
@@ -582,8 +543,22 @@ namespace WebPify
 
         private void button_cancelConvert_Click(object sender, EventArgs e)
         {
-            _cancel = true;
-            CanCancel = false;
+            _requestCancel = true;
+            SetCanRequestCancel(false);
+        }
+
+        private void textBox_log_LinkClicked(object sender, LinkClickedEventArgs e)
+        {
+            if (e.LinkText != null)
+            {
+                string fullPath = Path.GetFullPath(e.LinkText);
+
+                bool isFilePath = File.Exists(fullPath);
+
+                string command = isFilePath ? $"/select,{fullPath}" : fullPath;
+
+                Process.Start("explorer.exe", command);
+            }
         }
         #endregion
     }

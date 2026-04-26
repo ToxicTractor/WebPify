@@ -8,11 +8,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Title>WebPify</Title>
     <FileVersion>1.2.0.0</FileVersion>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="WebPWrapper" Version="1.3.0" />
+    <PackageReference Include="WebPWrapper" Version="1.5.0" />
   </ItemGroup>
 
   <ItemGroup>
